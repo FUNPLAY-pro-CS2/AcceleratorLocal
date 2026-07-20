@@ -1,0 +1,6 @@
+[submodule "vendor/breakpad"]
+	path = vendor/breakpad
+	url = https://github.com/SlynxCZ/breakpad.git
+[submodule "vendor/dynlibutils"]
+	path = vendor/dynlibutils
+	url = https://github.com/SlynxCZ/DynLibUtils

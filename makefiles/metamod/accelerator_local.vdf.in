@@ -1,0 +1,5 @@
+"Metamod Plugin"
+{
+	"alias"	"accelerator_local"
+	"file"	"addons/accelerator_local/bin/${PROJECT_VDF_PLATFORM}/accelerator_local"
+}

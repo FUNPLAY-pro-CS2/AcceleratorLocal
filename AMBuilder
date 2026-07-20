@@ -1,50 +1,102 @@
 # vim: set sts=2 ts=8 sw=2 tw=99 et ft=python: 
 import os
 
+CSGO_PROTO_DIR = os.environ.get('CSGO_PROTO')
+
 # Here only one sdk should be available to generate only one executable in the end,
 # as multi-sdk loading isn't supported out of the box by metamod, and would require specifying the full path in the vdf
 # which in the end would ruin the multi-platform (unix, win etc) loading by metamod as it won't be able to append platform specific extension
 # so just fall back to the single binary.
 # Multi-sdk solutions should be manually loaded with a custom plugin loader (examples being sourcemod, stripper:source)
-for sdk_name in MMSPlugin.sdks:
-  for cxx in MMSPlugin.all_targets:
-    sdk = MMSPlugin.sdks[sdk_name]
+for sdk_target in MMSPlugin.sdk_targets:
+  sdk = sdk_target.sdk
+  cxx = sdk_target.cxx
 
-    if not cxx.target.arch in sdk.platformSpec[cxx.target.platform]:
-      continue
+  binary = MMSPlugin.HL2Library(builder, cxx, MMSPlugin.plugin_name, sdk)
 
-    binary = MMSPlugin.HL2Library(builder, cxx, MMSPlugin.plugin_name, sdk)
+  binary.sources += [
+    os.path.join('src', 'plugin.cpp'),
+  ]
 
-    binary.sources += [
-      'accelerator_local.cpp',
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf_cfi_to_module.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf_cu_to_module.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf_line_to_module.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf_range_list_handler.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'language.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'module.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'path_helper.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'stabs_reader.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'stabs_to_module.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf', 'bytereader.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf', 'dwarf2diehandler.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf', 'dwarf2reader.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'dwarf', 'elf_reader.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'linux', 'crc32.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'linux', 'dump_symbols.cc'),
-      os.path.join('breakpad', 'src', 'src', 'common', 'linux', 'elf_symbols_to_module.cc')
+  binary.sources += [
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf_cfi_to_module.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf_cu_to_module.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf_line_to_module.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf_range_list_handler.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'language.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'module.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'path_helper.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'stabs_reader.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'stabs_to_module.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf', 'bytereader.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf', 'dwarf2diehandler.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf', 'dwarf2reader.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'dwarf', 'elf_reader.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'linux', 'crc32.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'linux', 'dump_symbols.cc'),
+    os.path.join('vendor', 'breakpad', 'src', 'common', 'linux', 'elf_symbols_to_module.cc')
+  ]
+
+  binary.compiler.cxxincludes += [
+    os.path.join(builder.sourcePath, 'breakpad-config', 'linux'),
+    os.path.join(builder.sourcePath, 'src'),
+    os.path.join(builder.sourcePath, 'src', 'protobuf'),
+    os.path.join(builder.sourcePath, 'vendor'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'client'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'common'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'google_breakpad'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'google_breakpad', 'common'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'google_breakpad', 'processor'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'processor'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'third_party'),
+    os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'tools'),
+    os.path.join(builder.sourcePath, 'vendor', 'dynlibutils', 'include'),
+    os.path.join(builder.sourcePath, 'vendor', 'dynlibutils', 'include', 'dynlibutils')
+  ]
+
+  if cxx.target.platform == 'linux':
+    binary.compiler.postlink += [
+      os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libbreakpad.a'),
+      os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libbreakpad-client.a'),
+      os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libdisasm.a'),
+      '-lz'
     ]
 
-    if sdk_name in ['dota', 'cs2']:
-      binary.sources += [
-      os.path.join(sdk.path, 'public', 'tier0', 'memoverride.cpp')
-    ]
+  sha = os.environ.get("GITHUB_SHA_SHORT", "Local")
+  semver = os.environ.get("SEMVER", "Local")
 
-    # Export only CreateInterface
-    if binary.compiler.target.platform == 'linux':
-      binary.compiler.linkflags += ['-Wl,--version-script=' + os.path.join(builder.currentSourcePath, 'ExportMap')]
+  binary.compiler.defines += [
+    f'GITHUB_SHA="{sha}"',
+    f'SEMVER="{semver}"'
+  ]
 
-    nodes = builder.Add(binary)
-    MMSPlugin.binaries += [nodes]
-    
-  break
+  # Export only CreateInterface
+  if binary.compiler.target.platform == 'linux':
+    binary.compiler.linkflags += ['-Wl,--version-script=' + os.path.join(builder.currentSourcePath, 'ExportMap')]
+
+  binary.custom = [builder.tools.Protoc(protoc = sdk_target.protoc, sources = [
+    os.path.join(CSGO_PROTO_DIR, 'network_connection.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'networkbasetypes.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'cs_gameevents.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'cs_usercmd.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'base_gcmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'econ_gcmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'engine_gcmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'gcsdk_gcmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'gcsystemmsgs.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'cstrike15_gcmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'cstrike15_usermessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'source2_steam_stats.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'netmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'steammessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'usercmd.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'usermessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'gameevents.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'clientmessages.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'te.proto'),
+    os.path.join(CSGO_PROTO_DIR, 'valveextensions.proto'),
+  ])]
+
+  nodes = builder.Add(binary)
+  MMSPlugin.binaries += [nodes]
