@@ -58,16 +58,16 @@ HTTPManager g_httpManager;
 CSteamGameServerAPIContext g_steamAPI;
 ISteamHTTP *g_pSteamHttp = nullptr;
 
-char crashMap[256];
-char crashGamePath[512];
-char crashCommandLine[1024];
-char dumpStoragePath[512];
+char g_szCrashMap[256];
+char g_szCrashGamePath[512];
+char g_szCrashCommandLine[1024];
+char g_szDumpStoragePath[512];
 
 char g_szDiscordWebhook[512];
-char pendingCrashPath[512];
-char sessionStatePath[512];
+char g_szPendingCrashPath[512];
+char g_szSessionStatePath[512];
 
-google_breakpad::ExceptionHandler* exceptionHandler = nullptr;
+google_breakpad::ExceptionHandler* g_pExceptionHandler = nullptr;
 CMiniDumpComment g_MiniDumpComment(95000);
 
 void (*SignalHandler)(int, siginfo_t*, void*);
@@ -97,17 +97,17 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
         return succeeded;
 
     // Leave a marker so the next server start knows there is an unprocessed crash.
-    int pending = sys_open(pendingCrashPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    int pending = sys_open(g_szPendingCrashPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
     if (pending != -1)
     {
         sys_write(pending, descriptor.path(), my_strlen(descriptor.path()));
         sys_close(pending);
     }
 
-    my_strlcpy(dumpStoragePath, descriptor.path(), sizeof(dumpStoragePath));
-    my_strlcat(dumpStoragePath, ".txt", sizeof(dumpStoragePath));
+    my_strlcpy(g_szDumpStoragePath, descriptor.path(), sizeof(g_szDumpStoragePath));
+    my_strlcat(g_szDumpStoragePath, ".txt", sizeof(g_szDumpStoragePath));
 
-    int extra = sys_open(dumpStoragePath, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
+    int extra = sys_open(g_szDumpStoragePath, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
     if (extra == -1)
     {
         sys_write(STDOUT_FILENO, "Failed to open metadata file!\n", 30);
@@ -116,11 +116,11 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
 
     sys_write(extra, "-------- CONFIG BEGIN --------", 30);
     sys_write(extra, "\nMap=", 5);
-    sys_write(extra, crashMap, my_strlen(crashMap));
+    sys_write(extra, g_szCrashMap, my_strlen(g_szCrashMap));
     sys_write(extra, "\nGamePath=", 10);
-    sys_write(extra, crashGamePath, my_strlen(crashGamePath));
+    sys_write(extra, g_szCrashGamePath, my_strlen(g_szCrashGamePath));
     sys_write(extra, "\nCommandLine=", 13);
-    sys_write(extra, crashCommandLine, my_strlen(crashCommandLine));
+    sys_write(extra, g_szCrashCommandLine, my_strlen(g_szCrashCommandLine));
     sys_write(extra, "\n-------- CONFIG END --------\n", 30);
     sys_write(extra, "\n", 1);
 
@@ -210,7 +210,7 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
                 }
             }
 
-            freopen(dumpStoragePath, "a", stdout);
+            freopen(g_szDumpStoragePath, "a", stdout);
             PrintProcessState(processState, true, false, &resolver);
             fflush(stdout);
         }
@@ -223,7 +223,7 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
 
 static void WriteSessionState(const char* pszState)
 {
-    FILE* file = fopen(sessionStatePath, "w");
+    FILE* file = fopen(g_szSessionStatePath, "w");
     if (file)
     {
         fputs(pszState, file);
@@ -408,7 +408,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
 {
     char szDumpPath[512] = {};
 
-    FILE* file = fopen(pendingCrashPath, "r");
+    FILE* file = fopen(g_szPendingCrashPath, "r");
     if (!file)
         return;
 
@@ -417,7 +417,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
     szDumpPath[total] = '\0';
 
     // Remove the marker first so a crash below can never loop forever.
-    unlink(pendingCrashPath);
+    unlink(g_szPendingCrashPath);
 
     if (!szDumpPath[0])
         return;
@@ -568,23 +568,23 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetFileSystemFactory, g_pFullFileSystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION);
 
-    strncpy(crashGamePath, ismm->GetBaseDir(), sizeof(crashGamePath) - 1);
-    ismm->Format(dumpStoragePath, sizeof(dumpStoragePath), "%s/addons/accelerator_local/dumps", ismm->GetBaseDir());
+    strncpy(g_szCrashGamePath, ismm->GetBaseDir(), sizeof(g_szCrashGamePath) - 1);
+    ismm->Format(g_szDumpStoragePath, sizeof(g_szDumpStoragePath), "%s/addons/accelerator_local/dumps", ismm->GetBaseDir());
 
     struct stat st = {0};
-    if (stat(dumpStoragePath, &st) == -1)
+    if (stat(g_szDumpStoragePath, &st) == -1)
     {
-        if (mkdir(dumpStoragePath, 0777) == -1)
+        if (mkdir(g_szDumpStoragePath, 0777) == -1)
         {
-            ismm->Format(error, maxlen, "%s didn't exist and we couldn't create it :(", dumpStoragePath);
+            ismm->Format(error, maxlen, "%s didn't exist and we couldn't create it :(", g_szDumpStoragePath);
             return false;
         }
     }
     else
-        chmod(dumpStoragePath, 0777);
+        chmod(g_szDumpStoragePath, 0777);
 
-    ismm->Format(pendingCrashPath, sizeof(pendingCrashPath), "%s/pending.state", dumpStoragePath);
-    ismm->Format(sessionStatePath, sizeof(sessionStatePath), "%s/session.state", dumpStoragePath);
+    ismm->Format(g_szPendingCrashPath, sizeof(g_szPendingCrashPath), "%s/pending.state", g_szDumpStoragePath);
+    ismm->Format(g_szSessionStatePath, sizeof(g_szSessionStatePath), "%s/session.state", g_szDumpStoragePath);
 
     // Load configuration file
     {
@@ -601,7 +601,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
     // Was the previous session healthy (reached StartupServer) before it died?
     bool bPrevSessionStarted = false;
     {
-        FILE* file = fopen(sessionStatePath, "r");
+        FILE* file = fopen(g_szSessionStatePath, "r");
         if (file)
         {
             char szState[16] = {};
@@ -614,8 +614,8 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 
     ProcessPendingCrash(bPrevSessionStarted);
 
-    google_breakpad::MinidumpDescriptor descriptor(dumpStoragePath);
-    exceptionHandler = new google_breakpad::ExceptionHandler(descriptor, NULL, dumpCallback, NULL, true, -1);
+    google_breakpad::MinidumpDescriptor descriptor(g_szDumpStoragePath);
+    g_pExceptionHandler = new google_breakpad::ExceptionHandler(descriptor, NULL, dumpCallback, NULL, true, -1);
 
     struct sigaction oact;
     sigaction(SIGSEGV, NULL, &oact);
@@ -628,7 +628,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
         m_iStartupServerHookID = SH_ADD_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &Plugin::Hook_StartupServer), true);
     }
 
-    strncpy(crashCommandLine, CommandLine()->GetCmdLine(), sizeof(crashCommandLine) - 1);
+    strncpy(g_szCrashCommandLine, CommandLine()->GetCmdLine(), sizeof(g_szCrashCommandLine) - 1);
 
     if (late)
     {
@@ -646,7 +646,7 @@ bool Plugin::Unload(char* error, size_t maxlen)
     SH_REMOVE_HOOK_ID(m_iGameServerSteamAPIDeactivatedHookID);
     SH_REMOVE_HOOK_ID(m_iStartupServerHookID);
 
-    delete exceptionHandler;
+    delete g_pExceptionHandler;
 
     return true;
 }
@@ -700,7 +700,7 @@ void Plugin::Hook_GameServerSteamAPIDeactivated()
 
 void Plugin::Hook_StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName)
 {
-    strncpy(crashMap, pszMapName, sizeof(crashMap) - 1);
+    strncpy(g_szCrashMap, pszMapName, sizeof(g_szCrashMap) - 1);
 
     WriteSessionState("started");
 }
