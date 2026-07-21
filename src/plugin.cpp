@@ -56,7 +56,7 @@ PLUGIN_EXPOSE(AcceleratorLocal, g_Plugin);
 
 HTTPManager g_httpManager;
 CSteamGameServerAPIContext g_steamAPI;
-ISteamHTTP *g_pSteamHttp = nullptr;
+ISteamHTTP* g_pSteamHttp = nullptr;
 
 char g_szCrashMap[256];
 char g_szCrashGamePath[512];
@@ -333,11 +333,11 @@ static void FlushPendingDiscordReport()
         g_strPendingDiscordContentType.c_str(),
         [](HTTPRequestHandle, json)
         {
-            META_CONPRINTF("[AcceleratorLocal] Crash report sent to Discord.\n");
+            META_LOG(&g_Plugin, "g_pExceptionHandlerCrash report sent to Discord.\n");
         },
         [](HTTPRequestHandle, EHTTPStatusCode statusCode, json)
         {
-            META_CONPRINTF("[AcceleratorLocal] Discord webhook failed (HTTP %d).\n", statusCode);
+            META_LOG(&g_Plugin, "g_pExceptionHandlerDiscord webhook failed (HTTP %d).\n", statusCode);
         },
         nullptr);
 
@@ -401,7 +401,7 @@ static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
     if (g_pSteamHttp)
         FlushPendingDiscordReport();
     else
-        META_CONPRINTF("[AcceleratorLocal] Crash report queued, will be sent to Discord once the Steam API activates.\n");
+        META_LOG(&g_Plugin, "g_pExceptionHandlerCrash report queued, will be sent to Discord once the Steam API activates.\n");
 }
 
 static void ProcessPendingCrash(bool bPrevSessionStarted)
@@ -424,11 +424,11 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
 
     if (!bPrevSessionStarted)
     {
-        META_CONPRINTF("[AcceleratorLocal] Crash dump %s left unprocessed: previous session crashed before the server finished starting (crash loop protection).\n", szDumpPath);
+        META_LOG(&g_Plugin, "g_pExceptionHandlerCrash dump %s left unprocessed: previous session crashed before the server finished starting (crash loop protection).\n", szDumpPath);
         return;
     }
 
-    META_CONPRINTF("[AcceleratorLocal] Server crashed last session, processing %s\n", szDumpPath);
+    META_LOG(&g_Plugin, "g_pExceptionHandlerServer crashed last session, processing %s\n", szDumpPath);
 
     google_breakpad::BasicSourceLineResolver resolver;
     google_breakpad::MinidumpProcessor processor(nullptr, &resolver);
@@ -437,7 +437,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
     google_breakpad::ProcessState processState;
     if (!miniDump.Read() || processor.Process(&miniDump, &processState) != google_breakpad::PROCESS_OK)
     {
-        META_CONPRINTF("[AcceleratorLocal] Failed to process the crash dump.\n");
+        META_LOG(&g_Plugin, "g_pExceptionHandlerFailed to process the crash dump.\n");
         return;
     }
 
@@ -552,7 +552,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
     else
         strncat(szReport, "\n(no third-party module found in the crash stack)\n", sizeof(szReport) - strlen(szReport) - 1);
 
-    META_CONPRINTF("[AcceleratorLocal] ---- Last crash ----\n%s[AcceleratorLocal] --------------------\n", szReport);
+    META_LOG(&g_Plugin, "g_pExceptionHandler---- Last crash ----\n%sg_pExceptionHandler--------------------\n", szReport);
 
     char szTxtPath[560];
     snprintf(szTxtPath, sizeof(szTxtPath), "%s.txt", szDumpPath);
@@ -595,7 +595,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
         if (config->LoadFromFile(g_pFullFileSystem, szConfigPath))
             strncpy(g_szDiscordWebhook, config->GetString("discord_webhook", ""), sizeof(g_szDiscordWebhook) - 1);
         else
-            META_CONPRINTF("[AcceleratorLocal] Failed to load %s, Discord reporting disabled.\n", szConfigPath);
+            META_LOG(this, "g_pExceptionHandlerFailed to load %s, Discord reporting disabled.\n", szConfigPath);
     }
 
     // Was the previous session healthy (reached StartupServer) before it died?

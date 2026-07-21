@@ -7,8 +7,9 @@
 
 #undef strdup
 
+extern Plugin g_Plugin;
 extern HTTPManager g_httpManager;
-extern ISteamHTTP *g_pSteamHttp;
+extern ISteamHTTP* g_pSteamHttp;
 
 HTTPManager::TrackedRequest::TrackedRequest(HTTPRequestHandle hndl, SteamAPICall_t hCall, std::string strUrl, std::string strText, CompletedCallback callbackCompleted, ErrorCallback callbackError) {
     m_hHTTPReq = hndl;
@@ -35,7 +36,7 @@ HTTPManager::TrackedRequest::~TrackedRequest() {
 
 void HTTPManager::TrackedRequest::OnHTTPRequestCompleted(HTTPRequestCompleted_t *arg, bool bFailed) {
     if (bFailed || (!m_callbackError && (arg->m_eStatusCode < 200 || arg->m_eStatusCode > 299))) {
-        META_CONPRINTF("[AcceleratorLocal] HTTP request to %s failed with status code %d\n", m_strUrl.c_str(), arg->m_eStatusCode);
+        META_LOG(&g_Plugin, "g_pExceptionHandlerHTTP request to %s failed with status code %d\n", m_strUrl.c_str(), arg->m_eStatusCode);
     } else {
         uint32 size;
         g_pSteamHttp->GetHTTPResponseBodySize(arg->m_hRequest, &size);
@@ -50,7 +51,7 @@ void HTTPManager::TrackedRequest::OnHTTPRequestCompleted(HTTPRequestCompleted_t 
             jsonResponse = json::parse((char *) response, nullptr, false);
 
             if (jsonResponse.is_discarded())
-                META_CONPRINTF("[AcceleratorLocal] Failed parsing JSON from HTTP response: %s\n", (char*)response);
+                META_LOG(&g_Plugin, "g_pExceptionHandlerFailed parsing JSON from HTTP response: %s\n", (char*)response);
         }
 
         if (arg->m_eStatusCode < 200 || arg->m_eStatusCode > 299) {
@@ -142,14 +143,14 @@ void HTTPManager::GenerateRequest(EHTTPMethod method, const char *pszUrl, const 
 
 void HTTPManager::GenerateRequestOverride(EHTTPMethod method, const char *pszUrl, uint8 *data, int size, const char *contentType, std::function<void(HTTPRequestHandle, json)> callbackCompleted, std::function<void(HTTPRequestHandle, EHTTPStatusCode, json)> callbackError, std::vector<HTTPHeader> *headers) {
     if (!g_pSteamHttp) {
-        META_CONPRINTF("[AcceleratorLocal] Steam HTTP is not available.\n");
+        META_LOG(&g_Plugin, "g_pExceptionHandlerSteam HTTP is not available.\n");
         return;
     }
 
     auto hReq = g_pSteamHttp->CreateHTTPRequest(method, pszUrl);
 
     if (data && size > 0 && !g_pSteamHttp->SetHTTPRequestRawPostBody(hReq, contentType, data, size)) {
-        META_CONPRINTF("[AcceleratorLocal] Failed to set raw POST body for: %s\n", pszUrl);
+        META_LOG(&g_Plugin, "g_pExceptionHandlerFailed to set raw POST body for: %s\n", pszUrl);
         return;
     }
 
