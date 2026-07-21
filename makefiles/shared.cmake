@@ -73,7 +73,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/vendor/breakpad/src/third_party
     ${CMAKE_SOURCE_DIR}/vendor/breakpad/src/tools
     ${CMAKE_SOURCE_DIR}/vendor/dynlibutils/include
-    ${CMAKE_SOURCE_DIR}/vendor/dynlibutils/include/dynlibutils
+    ${CMAKE_SOURCE_DIR}/vendor/nlohmann
 )
 
 include(${CMAKE_CURRENT_LIST_DIR}/metamod/configure_metamod.cmake)

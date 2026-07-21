@@ -37,10 +37,16 @@ private:
 
 public:
 	void Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick);
+	void Hook_GameServerSteamAPIActivated();
+	void Hook_GameServerSteamAPIDeactivated();
 	void Hook_StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName);
 
 	int m_iGameFrameHookID;
+	int m_iGameServerSteamAPIActivatedHookID;
+	int m_iGameServerSteamAPIDeactivatedHookID;
 	int m_iStartupServerHookID;
 };
+
+PLUGIN_GLOBALVARS();
 
 #endif //_INCLUDE_METAMOD_SOURCE_STUB_PLUGIN_H_

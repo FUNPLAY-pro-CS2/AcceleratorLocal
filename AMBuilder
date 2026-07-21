@@ -15,6 +15,7 @@ for sdk_target in MMSPlugin.sdk_targets:
   binary = MMSPlugin.HL2Library(builder, cxx, MMSPlugin.plugin_name, sdk)
 
   binary.sources += [
+    os.path.join('src', 'httpmanager.cpp'),
     os.path.join('src', 'plugin.cpp'),
   ]
 
@@ -52,7 +53,8 @@ for sdk_target in MMSPlugin.sdk_targets:
     os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'third_party'),
     os.path.join(builder.sourcePath, 'vendor', 'breakpad', 'src', 'tools'),
     os.path.join(builder.sourcePath, 'vendor', 'dynlibutils', 'include'),
-    os.path.join(builder.sourcePath, 'vendor', 'dynlibutils', 'include', 'dynlibutils')
+    os.path.join(builder.sourcePath, 'vendor', 'dynlibutils', 'include', 'dynlibutils'),
+    os.path.join(builder.sourcePath, 'vendor', 'nlohmann')
   ]
 
   if cxx.target.platform == 'linux':
@@ -60,6 +62,7 @@ for sdk_target in MMSPlugin.sdk_targets:
       os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libbreakpad.a'),
       os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libbreakpad-client.a'),
       os.path.join(builder.sourcePath, 'vendor', 'breakpad-build', 'libdisasm.a'),
+      os.path.join(sdk['path'], 'lib', 'linux64', 'libsteam_api.so'),
       '-lz'
     ]
 

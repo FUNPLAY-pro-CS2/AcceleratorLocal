@@ -17,7 +17,12 @@
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 
 #include "plugin.h"
+
 #include "CMiniDumpComment.hpp"
+#include "httpmanager.h"
+
+#include "filesystem.h"
+#include <tier1/KeyValues.h>
 
 #include "client/linux/handler/exception_handler.h"
 #include "common/linux/linux_libc_support.h"
@@ -29,6 +34,7 @@
 #include <signal.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <limits>
 
 #include "common/path_helper.h"
@@ -41,14 +47,25 @@
 #include <google_breakpad/processor/call_stack.h>
 #include <google_breakpad/processor/stack_frame.h>
 #include <processor/pathname_stripper.h>
+#include "common/linux/dump_symbols.h"
+
+#include <sstream>
 
 Plugin g_Plugin;
 PLUGIN_EXPOSE(AcceleratorLocal, g_Plugin);
+
+HTTPManager g_httpManager;
+CSteamGameServerAPIContext g_steamAPI;
+ISteamHTTP *g_pSteamHttp = nullptr;
 
 char crashMap[256];
 char crashGamePath[512];
 char crashCommandLine[1024];
 char dumpStoragePath[512];
+
+char g_szDiscordWebhook[512];
+char pendingCrashPath[512];
+char sessionStatePath[512];
 
 google_breakpad::ExceptionHandler* exceptionHandler = nullptr;
 CMiniDumpComment g_MiniDumpComment(95000);
@@ -62,6 +79,8 @@ class GameSessionConfiguration_t
 };
 
 SH_DECL_HOOK3_void(ISource2Server, GameFrame, SH_NOATTRIB, 0, bool, bool, bool);
+SH_DECL_HOOK0_void(ISource2Server, GameServerSteamAPIActivated, SH_NOATTRIB, 0);
+SH_DECL_HOOK0_void(ISource2Server, GameServerSteamAPIDeactivated, SH_NOATTRIB, 0);
 SH_DECL_HOOK3_void(INetworkServerService, StartupServer, SH_NOATTRIB, 0, const GameSessionConfiguration_t&, ISource2WorldSession*, const char*);
 
 static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, void* context, bool succeeded)
@@ -76,6 +95,14 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
 
     if (!succeeded)
         return succeeded;
+
+    // Leave a marker so the next server start knows there is an unprocessed crash.
+    int pending = sys_open(pendingCrashPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (pending != -1)
+    {
+        sys_write(pending, descriptor.path(), my_strlen(descriptor.path()));
+        sys_close(pending);
+    }
 
     my_strlcpy(dumpStoragePath, descriptor.path(), sizeof(dumpStoragePath));
     my_strlcat(dumpStoragePath, ".txt", sizeof(dumpStoragePath));
@@ -194,6 +221,344 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
     return succeeded;
 }
 
+static void WriteSessionState(const char* pszState)
+{
+    FILE* file = fopen(sessionStatePath, "w");
+    if (file)
+    {
+        fputs(pszState, file);
+        fclose(file);
+    }
+}
+
+static bool RunCommandCapture(const char* pszCommand, char* pszOut, size_t maxlen)
+{
+    pszOut[0] = '\0';
+
+    FILE* pipe = popen(pszCommand, "r");
+    if (!pipe)
+        return false;
+
+    size_t total = fread(pszOut, 1, maxlen - 1, pipe);
+    pszOut[total] = '\0';
+
+    return pclose(pipe) == 0 && total > 0;
+}
+
+// Paths end up inside single quotes in a shell command, so refuse anything that could break out.
+static bool IsShellSafe(const char* psz)
+{
+    for (; *psz; ++psz)
+    {
+        if (*psz == '\'' || *psz == '\\' || *psz == '\n' || *psz == '\r')
+            return false;
+    }
+
+    return true;
+}
+
+// Returns "llvm-symbolizer", "addr2line" or nullptr depending on what is available on the machine.
+static const char* FindSymbolizerTool()
+{
+    static char szTool[32];
+
+    char szOut[256];
+    if (RunCommandCapture("command -v llvm-symbolizer 2>/dev/null", szOut, sizeof(szOut)))
+    {
+        strncpy(szTool, "llvm-symbolizer", sizeof(szTool) - 1);
+        return szTool;
+    }
+
+    if (RunCommandCapture("command -v addr2line 2>/dev/null", szOut, sizeof(szOut)))
+    {
+        strncpy(szTool, "addr2line", sizeof(szTool) - 1);
+        return szTool;
+    }
+
+    return nullptr;
+}
+
+static bool SymbolizeAddress(const char* pszTool, const char* pszModulePath, uint64_t offset, char* pszOut, size_t maxlen)
+{
+    pszOut[0] = '\0';
+
+    if (!pszTool || !IsShellSafe(pszModulePath) || access(pszModulePath, R_OK) != 0)
+        return false;
+
+    char szCommand[1024];
+    if (strcmp(pszTool, "llvm-symbolizer") == 0)
+        snprintf(szCommand, sizeof(szCommand), "llvm-symbolizer --obj='%s' 0x%lx 2>/dev/null", pszModulePath, offset);
+    else
+        snprintf(szCommand, sizeof(szCommand), "addr2line -f -C -e '%s' 0x%lx 2>/dev/null", pszModulePath, offset);
+
+    char szOutput[1024];
+    if (!RunCommandCapture(szCommand, szOutput, sizeof(szOutput)))
+        return false;
+
+    // First line is the function name, second line is file:line.
+    char* pszFunction = szOutput;
+    char* pszLocation = strchr(szOutput, '\n');
+    if (pszLocation)
+    {
+        *pszLocation++ = '\0';
+        char* pszEnd = strchr(pszLocation, '\n');
+        if (pszEnd)
+            *pszEnd = '\0';
+    }
+
+    if (!pszFunction[0] || strcmp(pszFunction, "??") == 0)
+        return false;
+
+    if (pszLocation && pszLocation[0] && strncmp(pszLocation, "??", 2) != 0)
+        snprintf(pszOut, maxlen, "%s @ %s", pszFunction, pszLocation);
+    else
+        snprintf(pszOut, maxlen, "%s", pszFunction);
+
+    return true;
+}
+
+// The crash is processed during plugin load, long before the Steam API activates,
+// so the finished report body waits here until Hook_GameServerSteamAPIActivated fires.
+std::string g_strPendingDiscordBody;
+std::string g_strPendingDiscordContentType;
+
+static void FlushPendingDiscordReport()
+{
+    if (g_strPendingDiscordBody.empty() || !g_pSteamHttp)
+        return;
+
+    HTTPManager::GenerateRequestOverride(
+        k_EHTTPMethodPOST, g_szDiscordWebhook,
+        (uint8*)g_strPendingDiscordBody.data(), (int)g_strPendingDiscordBody.size(),
+        g_strPendingDiscordContentType.c_str(),
+        [](HTTPRequestHandle, json)
+        {
+            META_CONPRINTF("[AcceleratorLocal] Crash report sent to Discord.\n");
+        },
+        [](HTTPRequestHandle, EHTTPStatusCode statusCode, json)
+        {
+            META_CONPRINTF("[AcceleratorLocal] Discord webhook failed (HTTP %d).\n", statusCode);
+        },
+        nullptr);
+
+    g_strPendingDiscordBody.clear();
+    g_strPendingDiscordContentType.clear();
+}
+
+static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
+{
+    if (!g_szDiscordWebhook[0])
+        return;
+
+    // Discord message limit is 2000 characters, keep some headroom for the code fences.
+    std::string content(pszReport);
+    if (content.size() > 1800)
+        content.resize(1800);
+
+    json payload;
+    payload["content"] = "```\n" + content + "\n```";
+
+    std::string txtData;
+    if (pszTxtPath)
+    {
+        FILE* file = fopen(pszTxtPath, "rb");
+        if (file)
+        {
+            char buffer[8192];
+            size_t bytes;
+            while ((bytes = fread(buffer, 1, sizeof(buffer), file)) > 0)
+                txtData.append(buffer, bytes);
+            fclose(file);
+        }
+    }
+
+    if (!txtData.empty())
+    {
+        // Discord needs multipart/form-data for attachments and Steam HTTP only takes
+        // a raw body, so the multipart body is assembled by hand.
+        const char* pszBoundary = "AcceleratorLocalBoundary7MA4YWxkTrZu0gW";
+
+        std::string body;
+        body += "--"; body += pszBoundary; body += "\r\n";
+        body += "Content-Disposition: form-data; name=\"payload_json\"\r\n";
+        body += "Content-Type: application/json\r\n\r\n";
+        body += payload.dump();
+        body += "\r\n--"; body += pszBoundary; body += "\r\n";
+        body += "Content-Disposition: form-data; name=\"files[0]\"; filename=\"crash.txt\"\r\n";
+        body += "Content-Type: text/plain\r\n\r\n";
+        body += txtData;
+        body += "\r\n--"; body += pszBoundary; body += "--\r\n";
+
+        g_strPendingDiscordBody = std::move(body);
+        g_strPendingDiscordContentType = std::string("multipart/form-data; boundary=") + pszBoundary;
+    }
+    else
+    {
+        g_strPendingDiscordBody = payload.dump();
+        g_strPendingDiscordContentType = "application/json";
+    }
+
+    if (g_pSteamHttp)
+        FlushPendingDiscordReport();
+    else
+        META_CONPRINTF("[AcceleratorLocal] Crash report queued, will be sent to Discord once the Steam API activates.\n");
+}
+
+static void ProcessPendingCrash(bool bPrevSessionStarted)
+{
+    char szDumpPath[512] = {};
+
+    FILE* file = fopen(pendingCrashPath, "r");
+    if (!file)
+        return;
+
+    size_t total = fread(szDumpPath, 1, sizeof(szDumpPath) - 1, file);
+    fclose(file);
+    szDumpPath[total] = '\0';
+
+    // Remove the marker first so a crash below can never loop forever.
+    unlink(pendingCrashPath);
+
+    if (!szDumpPath[0])
+        return;
+
+    if (!bPrevSessionStarted)
+    {
+        META_CONPRINTF("[AcceleratorLocal] Crash dump %s left unprocessed: previous session crashed before the server finished starting (crash loop protection).\n", szDumpPath);
+        return;
+    }
+
+    META_CONPRINTF("[AcceleratorLocal] Server crashed last session, processing %s\n", szDumpPath);
+
+    google_breakpad::BasicSourceLineResolver resolver;
+    google_breakpad::MinidumpProcessor processor(nullptr, &resolver);
+    google_breakpad::Minidump miniDump(szDumpPath);
+
+    google_breakpad::ProcessState processState;
+    if (!miniDump.Read() || processor.Process(&miniDump, &processState) != google_breakpad::PROCESS_OK)
+    {
+        META_CONPRINTF("[AcceleratorLocal] Failed to process the crash dump.\n");
+        return;
+    }
+
+    int requestingThread = processState.requesting_thread();
+    if (requestingThread == -1)
+        requestingThread = 0;
+
+    const google_breakpad::CallStack* stack = processState.threads()->at(requestingThread);
+    size_t frameCount = MIN(stack->frames()->size(), 10);
+
+    // Symbolize third-party (addons/) modules in-process with the bundled breakpad:
+    // symbols are extracted straight from the ELF on disk, so nothing besides this
+    // plugin is needed inside the steamrt container.
+    // Breakpad's demangler predates C++20 mangling and floods stderr with thousands of
+    // "failed to demangle" warnings on modern binaries, so stderr is muted while dumping.
+    int savedStderr = dup(STDERR_FILENO);
+    int devNull = open("/dev/null", O_WRONLY);
+    if (devNull != -1)
+        dup2(devNull, STDERR_FILENO);
+
+    for (size_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+    {
+        google_breakpad::StackFrame* frame = stack->frames()->at(frameIndex);
+        if (!frame->module || resolver.HasModule(frame->module))
+            continue;
+
+        const std::string modulePath = frame->module->code_file();
+        if (modulePath.find("/addons/") == std::string::npos || access(modulePath.c_str(), R_OK) != 0)
+            continue;
+
+        std::ostringstream symbolStream;
+        google_breakpad::DumpOptions options(SYMBOLS_AND_FILES, true, false, false);
+        if (google_breakpad::WriteSymbolFile(modulePath, modulePath, "Linux", "", std::vector<string>(), options, symbolStream))
+            resolver.LoadModuleUsingMapBuffer(frame->module, symbolStream.str());
+    }
+
+    if (devNull != -1)
+    {
+        if (savedStderr != -1)
+            dup2(savedStderr, STDERR_FILENO);
+        close(devNull);
+    }
+    if (savedStderr != -1)
+        close(savedStderr);
+
+    // External tools stay as a fallback for modules the in-process pass couldn't handle.
+    const char* pszTool = FindSymbolizerTool();
+
+    char szReport[3072];
+    snprintf(szReport, sizeof(szReport), "Server crashed: %s @ 0x%lx\n\n",
+             processState.crash_reason().c_str(), processState.crash_address());
+
+    char szCulprit[768] = {};
+
+    for (size_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+    {
+        google_breakpad::StackFrame* frame = stack->frames()->at(frameIndex);
+
+        char szLine[1024];
+        uint64_t moduleOffset = frame->ReturnAddress();
+
+        if (frame->module)
+        {
+            const std::string modulePath = frame->module->code_file();
+            const std::string moduleFile = google_breakpad::PathnameStripper::File(modulePath);
+            moduleOffset -= frame->module->base_address();
+
+            // Anything living in addons/ is a third-party plugin, so it can be symbolized locally
+            // and the first such frame is the most likely culprit.
+            char szSymbol[512] = {};
+            if (modulePath.find("/addons/") != std::string::npos)
+            {
+                resolver.FillSourceLineInfo(frame, nullptr);
+
+                if (!frame->function_name.empty())
+                {
+                    if (!frame->source_file_name.empty())
+                        snprintf(szSymbol, sizeof(szSymbol), "%s @ %s:%d", frame->function_name.c_str(),
+                                 google_breakpad::PathnameStripper::File(frame->source_file_name).c_str(), frame->source_line);
+                    else
+                        snprintf(szSymbol, sizeof(szSymbol), "%s", frame->function_name.c_str());
+                }
+                else
+                    SymbolizeAddress(pszTool, modulePath.c_str(), moduleOffset, szSymbol, sizeof(szSymbol));
+
+                if (!szCulprit[0])
+                {
+                    if (szSymbol[0])
+                        snprintf(szCulprit, sizeof(szCulprit), "%s -> %s", moduleFile.c_str(), szSymbol);
+                    else
+                        snprintf(szCulprit, sizeof(szCulprit), "%s + 0x%lx", moduleFile.c_str(), moduleOffset);
+                }
+            }
+
+            if (szSymbol[0])
+                snprintf(szLine, sizeof(szLine), "#%zu %s + 0x%lx (%s)\n", frameIndex, moduleFile.c_str(), moduleOffset, szSymbol);
+            else
+                snprintf(szLine, sizeof(szLine), "#%zu %s + 0x%lx\n", frameIndex, moduleFile.c_str(), moduleOffset);
+        }
+        else
+            snprintf(szLine, sizeof(szLine), "#%zu unknown + 0x%lx\n", frameIndex, moduleOffset);
+
+        strncat(szReport, szLine, sizeof(szReport) - strlen(szReport) - 1);
+    }
+
+    if (szCulprit[0])
+    {
+        strncat(szReport, "\nSuspected culprit: ", sizeof(szReport) - strlen(szReport) - 1);
+        strncat(szReport, szCulprit, sizeof(szReport) - strlen(szReport) - 1);
+        strncat(szReport, "\n", sizeof(szReport) - strlen(szReport) - 1);
+    }
+    else
+        strncat(szReport, "\n(no third-party module found in the crash stack)\n", sizeof(szReport) - strlen(szReport) - 1);
+
+    META_CONPRINTF("[AcceleratorLocal] ---- Last crash ----\n%s[AcceleratorLocal] --------------------\n", szReport);
+
+    char szTxtPath[560];
+    snprintf(szTxtPath, sizeof(szTxtPath), "%s.txt", szDumpPath);
+    SendDiscordReport(szReport, szTxtPath);
+}
+
 bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late)
 {
     PLUGIN_SAVEVARS();
@@ -201,6 +566,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
     GET_V_IFACE_CURRENT(GetServerFactory, g_pSource2Server, ISource2Server, SOURCE2SERVER_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pNetworkServerService, INetworkServerService, NETWORKSERVERSERVICE_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
+    GET_V_IFACE_CURRENT(GetFileSystemFactory, g_pFullFileSystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION);
 
     strncpy(crashGamePath, ismm->GetBaseDir(), sizeof(crashGamePath) - 1);
     ismm->Format(dumpStoragePath, sizeof(dumpStoragePath), "%s/addons/accelerator_local/dumps", ismm->GetBaseDir());
@@ -217,6 +583,37 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
     else
         chmod(dumpStoragePath, 0777);
 
+    ismm->Format(pendingCrashPath, sizeof(pendingCrashPath), "%s/pending.state", dumpStoragePath);
+    ismm->Format(sessionStatePath, sizeof(sessionStatePath), "%s/session.state", dumpStoragePath);
+
+    // Load configuration file
+    {
+        char szConfigPath[512];
+        ismm->Format(szConfigPath, sizeof(szConfigPath), "%s/addons/accelerator_local/accelerator_local.ini", ismm->GetBaseDir());
+
+        KeyValues::AutoDelete config("accelerator_local");
+        if (config->LoadFromFile(g_pFullFileSystem, szConfigPath))
+            strncpy(g_szDiscordWebhook, config->GetString("discord_webhook", ""), sizeof(g_szDiscordWebhook) - 1);
+        else
+            META_CONPRINTF("[AcceleratorLocal] Failed to load %s, Discord reporting disabled.\n", szConfigPath);
+    }
+
+    // Was the previous session healthy (reached StartupServer) before it died?
+    bool bPrevSessionStarted = false;
+    {
+        FILE* file = fopen(sessionStatePath, "r");
+        if (file)
+        {
+            char szState[16] = {};
+            fread(szState, 1, sizeof(szState) - 1, file);
+            fclose(file);
+            bPrevSessionStarted = strncmp(szState, "started", 7) == 0;
+        }
+    }
+    WriteSessionState("loading");
+
+    ProcessPendingCrash(bPrevSessionStarted);
+
     google_breakpad::MinidumpDescriptor descriptor(dumpStoragePath);
     exceptionHandler = new google_breakpad::ExceptionHandler(descriptor, NULL, dumpCallback, NULL, true, -1);
 
@@ -226,6 +623,8 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 
     {
         m_iGameFrameHookID = SH_ADD_HOOK(ISource2Server, GameFrame, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameFrame), true);
+        m_iGameServerSteamAPIActivatedHookID = SH_ADD_HOOK(ISource2Server, GameServerSteamAPIActivated, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameServerSteamAPIActivated), true);
+        m_iGameServerSteamAPIDeactivatedHookID = SH_ADD_HOOK(ISource2Server, GameServerSteamAPIDeactivated, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameServerSteamAPIDeactivated), true);
         m_iStartupServerHookID = SH_ADD_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &Plugin::Hook_StartupServer), true);
     }
 
@@ -233,6 +632,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 
     if (late)
     {
+        Hook_GameServerSteamAPIActivated();
         Hook_StartupServer({}, nullptr, g_pNetworkServerService->GetIGameServer()->GetMapName());
     }
 
@@ -242,6 +642,8 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 bool Plugin::Unload(char* error, size_t maxlen)
 {
     SH_REMOVE_HOOK_ID(m_iGameFrameHookID);
+    SH_REMOVE_HOOK_ID(m_iGameServerSteamAPIActivatedHookID);
+    SH_REMOVE_HOOK_ID(m_iGameServerSteamAPIDeactivatedHookID);
     SH_REMOVE_HOOK_ID(m_iStartupServerHookID);
 
     delete exceptionHandler;
@@ -282,9 +684,25 @@ void Plugin::Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick)
         sigaction(kExceptionSignals[i], &act, NULL);
 }
 
+void Plugin::Hook_GameServerSteamAPIActivated()
+{
+    g_steamAPI.Init();
+    g_pSteamHttp = g_steamAPI.SteamHTTP();
+
+    g_httpManager.DrainQueue();
+    FlushPendingDiscordReport();
+}
+
+void Plugin::Hook_GameServerSteamAPIDeactivated()
+{
+    g_pSteamHttp = nullptr;
+}
+
 void Plugin::Hook_StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName)
 {
     strncpy(crashMap, pszMapName, sizeof(crashMap) - 1);
+
+    WriteSessionState("started");
 }
 
 ///////////////////////////////////////

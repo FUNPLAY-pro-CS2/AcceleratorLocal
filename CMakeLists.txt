@@ -96,12 +96,6 @@ if (LINUX)
         PREFIX ""
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/addons/accelerator_local/bin/linuxsteamrt64"
     )
-elseif (WIN32)
-    include(${CMAKE_SOURCE_DIR}/makefiles/windows.base.cmake)
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-        PREFIX ""
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/addons/accelerator_local/bin/win64"
-    )
 endif()
 
 target_link_libraries(${PROJECT_NAME} ${LINK_LIBRARIES})
