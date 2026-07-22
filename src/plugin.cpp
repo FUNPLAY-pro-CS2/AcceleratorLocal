@@ -22,7 +22,9 @@
 #include "httpmanager.h"
 
 #include "filesystem.h"
-#include <tier1/KeyValues.h>
+#include "networksystem/inetworksystem.h"
+#include "tier1/KeyValues.h"
+#include "tier1/netadr.h"
 
 #include "client/linux/handler/exception_handler.h"
 #include "common/linux/linux_libc_support.h"
@@ -37,17 +39,17 @@
 #include <ctype.h>
 #include <limits>
 
+#include "common/linux/dump_symbols.h"
 #include "common/path_helper.h"
 #include "common/using_std_string.h"
 #include "google_breakpad/processor/basic_source_line_resolver.h"
+#include "google_breakpad/processor/call_stack.h"
 #include "google_breakpad/processor/minidump_processor.h"
 #include "google_breakpad/processor/process_state.h"
+#include "google_breakpad/processor/stack_frame.h"
+#include "processor/pathname_stripper.h"
 #include "processor/simple_symbol_supplier.h"
 #include "processor/stackwalk_common.h"
-#include <google_breakpad/processor/call_stack.h>
-#include <google_breakpad/processor/stack_frame.h>
-#include <processor/pathname_stripper.h>
-#include "common/linux/dump_symbols.h"
 
 #include <sstream>
 
@@ -317,51 +319,30 @@ static bool SymbolizeAddress(const char* pszTool, const char* pszModulePath, uin
     return true;
 }
 
+static void GetServerAddress(char* pszOut, size_t maxlen);
+
 // The crash is processed during plugin load, long before the Steam API activates,
-// so the finished report body waits here until Hook_GameServerSteamAPIActivated fires.
-std::string g_strPendingDiscordBody;
-std::string g_strPendingDiscordContentType;
+// so the report waits here until Hook_GameServerSteamAPIActivated fires. The payload
+// is assembled only at flush time: by then the server socket is open and the network
+// system knows the real server address, which goes into the message.
+std::string g_strPendingReport;
+std::string g_strPendingTxtPath;
 
 static void FlushPendingDiscordReport()
 {
-    if (g_strPendingDiscordBody.empty() || !g_pSteamHttp)
+    if (g_strPendingReport.empty() || !g_pSteamHttp)
         return;
 
-    HTTPManager::GenerateRequestOverride(
-        k_EHTTPMethodPOST, g_szDiscordWebhook,
-        (uint8*)g_strPendingDiscordBody.data(), (int)g_strPendingDiscordBody.size(),
-        g_strPendingDiscordContentType.c_str(),
-        [](HTTPRequestHandle, json)
-        {
-            META_LOG(&g_Plugin, "g_pExceptionHandlerCrash report sent to Discord.\n");
-        },
-        [](HTTPRequestHandle, EHTTPStatusCode statusCode, json)
-        {
-            META_LOG(&g_Plugin, "g_pExceptionHandlerDiscord webhook failed (HTTP %d).\n", statusCode);
-        },
-        nullptr);
-
-    g_strPendingDiscordBody.clear();
-    g_strPendingDiscordContentType.clear();
-}
-
-static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
-{
-    if (!g_szDiscordWebhook[0])
-        return;
-
-    // Discord message limit is 2000 characters, keep some headroom for the code fences.
-    std::string content(pszReport);
-    if (content.size() > 1800)
-        content.resize(1800);
+    char szAddress[80];
+    GetServerAddress(szAddress, sizeof(szAddress));
 
     json payload;
-    payload["content"] = "```\n" + content + "\n```";
+    payload["content"] = "Server `" + std::string(szAddress) + "` crashed\n```\n" + g_strPendingReport + "\n```";
 
     std::string txtData;
-    if (pszTxtPath)
+    if (!g_strPendingTxtPath.empty())
     {
-        FILE* file = fopen(pszTxtPath, "rb");
+        FILE* file = fopen(g_strPendingTxtPath.c_str(), "rb");
         if (file)
         {
             char buffer[8192];
@@ -372,13 +353,15 @@ static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
         }
     }
 
+    std::string body;
+    std::string contentType;
+
     if (!txtData.empty())
     {
         // Discord needs multipart/form-data for attachments and Steam HTTP only takes
         // a raw body, so the multipart body is assembled by hand.
         const char* pszBoundary = "AcceleratorLocalBoundary7MA4YWxkTrZu0gW";
 
-        std::string body;
         body += "--"; body += pszBoundary; body += "\r\n";
         body += "Content-Disposition: form-data; name=\"payload_json\"\r\n";
         body += "Content-Type: application/json\r\n\r\n";
@@ -389,19 +372,101 @@ static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
         body += txtData;
         body += "\r\n--"; body += pszBoundary; body += "--\r\n";
 
-        g_strPendingDiscordBody = std::move(body);
-        g_strPendingDiscordContentType = std::string("multipart/form-data; boundary=") + pszBoundary;
+        contentType = std::string("multipart/form-data; boundary=") + pszBoundary;
     }
     else
     {
-        g_strPendingDiscordBody = payload.dump();
-        g_strPendingDiscordContentType = "application/json";
+        body = payload.dump();
+        contentType = "application/json";
     }
+
+    HTTPManager::GenerateRequestOverride(
+        k_EHTTPMethodPOST, g_szDiscordWebhook,
+        (uint8*)body.data(), (int)body.size(),
+        contentType.c_str(),
+        [](HTTPRequestHandle, json)
+        {
+            META_LOG(&g_Plugin, "Crash report sent to Discord.");
+        },
+        [](HTTPRequestHandle, EHTTPStatusCode statusCode, json)
+        {
+            META_LOG(&g_Plugin, "Discord webhook failed (HTTP %d).", statusCode);
+        },
+        nullptr);
+
+    g_strPendingReport.clear();
+    g_strPendingTxtPath.clear();
+}
+
+static void SendDiscordReport(const char* pszReport, const char* pszTxtPath)
+{
+    if (!g_szDiscordWebhook[0])
+        return;
+
+    // Discord message limit is 2000 characters, keep some headroom for the code
+    // fences and the address line added at flush time.
+    std::string content(pszReport);
+    if (content.size() > 1700)
+        content.resize(1700);
+
+    g_strPendingReport = std::move(content);
+    g_strPendingTxtPath = pszTxtPath ? pszTxtPath : "";
 
     if (g_pSteamHttp)
         FlushPendingDiscordReport();
     else
-        META_LOG(&g_Plugin, "g_pExceptionHandlerCrash report queued, will be sent to Discord once the Steam API activates.\n");
+        META_LOG(&g_Plugin, "Crash report queued, will be sent to Discord once the Steam API activates.");
+}
+
+static void GetServerAddress(char* pszOut, size_t maxlen)
+{
+    char szIp[64] = {};
+    char szPort[16] = {};
+
+    if (g_pNetworkSystem)
+    {
+        const netadr_t& publicAdr = g_pNetworkSystem->GetPublicAdr();
+        const netadr_t& adr = (publicAdr.ip[0] | publicAdr.ip[1] | publicAdr.ip[2] | publicAdr.ip[3])
+                                  ? publicAdr
+                                  : g_pNetworkSystem->GetLocalAdr();
+
+        if (adr.ip[0] | adr.ip[1] | adr.ip[2] | adr.ip[3])
+            snprintf(szIp, sizeof(szIp), "%hhu.%hhu.%hhu.%hhu", adr.ip[0], adr.ip[1], adr.ip[2], adr.ip[3]);
+
+        uint16 port = g_pNetworkSystem->GetUDPPort(1);
+        if (port)
+            snprintf(szPort, sizeof(szPort), "%hu", port);
+    }
+
+    // Fall back to the launch parameters for whatever the network system couldn't provide.
+    const char* pszCmdLine = CommandLine()->GetCmdLine();
+
+    auto findArg = [pszCmdLine](const char* pszName, char* pszValue, size_t valuelen)
+    {
+        const char* psz = strstr(pszCmdLine, pszName);
+        if (!psz)
+            return;
+
+        psz += strlen(pszName);
+        while (*psz == ' ')
+            ++psz;
+
+        size_t i = 0;
+        while (*psz && *psz != ' ' && *psz != '"' && i < valuelen - 1)
+            pszValue[i++] = *psz++;
+        pszValue[i] = '\0';
+    };
+
+    if (!szIp[0])
+        findArg("-ip ", szIp, sizeof(szIp));
+    if (!szPort[0])
+    {
+        findArg("-port ", szPort, sizeof(szPort));
+        if (!szPort[0])
+            findArg("+port ", szPort, sizeof(szPort));
+    }
+
+    snprintf(pszOut, maxlen, "%s:%s", szIp[0] ? szIp : "0.0.0.0", szPort[0] ? szPort : "27015");
 }
 
 static void ProcessPendingCrash(bool bPrevSessionStarted)
@@ -424,11 +489,11 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
 
     if (!bPrevSessionStarted)
     {
-        META_LOG(&g_Plugin, "g_pExceptionHandlerCrash dump %s left unprocessed: previous session crashed before the server finished starting (crash loop protection).\n", szDumpPath);
+        META_LOG(&g_Plugin, "Crash dump %s left unprocessed: previous session crashed before the server finished starting (crash loop protection).", szDumpPath);
         return;
     }
 
-    META_LOG(&g_Plugin, "g_pExceptionHandlerServer crashed last session, processing %s\n", szDumpPath);
+    META_LOG(&g_Plugin, "Server crashed last session, processing %s", szDumpPath);
 
     google_breakpad::BasicSourceLineResolver resolver;
     google_breakpad::MinidumpProcessor processor(nullptr, &resolver);
@@ -437,7 +502,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
     google_breakpad::ProcessState processState;
     if (!miniDump.Read() || processor.Process(&miniDump, &processState) != google_breakpad::PROCESS_OK)
     {
-        META_LOG(&g_Plugin, "g_pExceptionHandlerFailed to process the crash dump.\n");
+        META_LOG(&g_Plugin, "Failed to process the crash dump.");
         return;
     }
 
@@ -552,7 +617,7 @@ static void ProcessPendingCrash(bool bPrevSessionStarted)
     else
         strncat(szReport, "\n(no third-party module found in the crash stack)\n", sizeof(szReport) - strlen(szReport) - 1);
 
-    META_LOG(&g_Plugin, "g_pExceptionHandler---- Last crash ----\n%sg_pExceptionHandler--------------------\n", szReport);
+    META_LOG(&g_Plugin, "---- Last crash ----\n%s--------------------", szReport);
 
     char szTxtPath[560];
     snprintf(szTxtPath, sizeof(szTxtPath), "%s.txt", szDumpPath);
@@ -565,6 +630,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 
     GET_V_IFACE_CURRENT(GetServerFactory, g_pSource2Server, ISource2Server, SOURCE2SERVER_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pNetworkServerService, INetworkServerService, NETWORKSERVERSERVICE_INTERFACE_VERSION);
+    GET_V_IFACE_CURRENT(GetEngineFactory, g_pNetworkSystem, INetworkSystem, NETWORKSYSTEM_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetEngineFactory, g_pCVar, ICvar, CVAR_INTERFACE_VERSION);
     GET_V_IFACE_CURRENT(GetFileSystemFactory, g_pFullFileSystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION);
 
@@ -595,7 +661,7 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
         if (config->LoadFromFile(g_pFullFileSystem, szConfigPath))
             strncpy(g_szDiscordWebhook, config->GetString("discord_webhook", ""), sizeof(g_szDiscordWebhook) - 1);
         else
-            META_LOG(this, "g_pExceptionHandlerFailed to load %s, Discord reporting disabled.\n", szConfigPath);
+            META_LOG(this, "Failed to load %s, Discord reporting disabled.", szConfigPath);
     }
 
     // Was the previous session healthy (reached StartupServer) before it died?
