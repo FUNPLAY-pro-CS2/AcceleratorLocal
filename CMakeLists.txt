@@ -33,11 +33,6 @@ file(GLOB_RECURSE SOURCE_FILES
 list(APPEND SOURCE_FILES
     ${SOURCESDK_DIR}/public/tier0/memoverride.cpp
     ${SOURCESDK_DIR}/tier1/keyvalues3.cpp
-    ${METAMOD_DIR}/core/sourcehook/sourcehook.cpp
-    ${METAMOD_DIR}/core/sourcehook/sourcehook_impl_chookidman.cpp
-    ${METAMOD_DIR}/core/sourcehook/sourcehook_impl_chookmaninfo.cpp
-    ${METAMOD_DIR}/core/sourcehook/sourcehook_impl_cvfnptr.cpp
-    ${METAMOD_DIR}/core/sourcehook/sourcehook_impl_cproto.cpp
 )
 
 foreach(f ${SOURCE_FILES})

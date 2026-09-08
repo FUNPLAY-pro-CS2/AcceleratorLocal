@@ -80,10 +80,13 @@ class GameSessionConfiguration_t
 {
 };
 
-SH_DECL_HOOK3_void(ISource2Server, GameFrame, SH_NOATTRIB, 0, bool, bool, bool);
-SH_DECL_HOOK0_void(ISource2Server, GameServerSteamAPIActivated, SH_NOATTRIB, 0);
-SH_DECL_HOOK0_void(ISource2Server, GameServerSteamAPIDeactivated, SH_NOATTRIB, 0);
-SH_DECL_HOOK3_void(INetworkServerService, StartupServer, SH_NOATTRIB, 0, const GameSessionConfiguration_t&, ISource2WorldSession*, const char*);
+Plugin::Plugin() :
+    KHOOK_NEW(m_hGameFrame, &ISource2Server::GameFrame, this, nullptr, &Plugin::Hook_GameFrame),
+    KHOOK_NEW(m_hGameServerSteamAPIActivated, &ISource2Server::GameServerSteamAPIActivated, this, nullptr, &Plugin::Hook_GameServerSteamAPIActivated),
+    KHOOK_NEW(m_hGameServerSteamAPIDeactivated, &ISource2Server::GameServerSteamAPIDeactivated, this, nullptr, &Plugin::Hook_GameServerSteamAPIDeactivated),
+    KHOOK_NEW(m_hStartupServer, &INetworkServerService::StartupServer, this, nullptr, &Plugin::Hook_StartupServer)
+{
+}
 
 static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, void* context, bool succeeded)
 {
@@ -688,18 +691,18 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
     SignalHandler = oact.sa_sigaction;
 
     {
-        m_iGameFrameHookID = SH_ADD_HOOK(ISource2Server, GameFrame, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameFrame), true);
-        m_iGameServerSteamAPIActivatedHookID = SH_ADD_HOOK(ISource2Server, GameServerSteamAPIActivated, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameServerSteamAPIActivated), true);
-        m_iGameServerSteamAPIDeactivatedHookID = SH_ADD_HOOK(ISource2Server, GameServerSteamAPIDeactivated, g_pSource2Server, SH_MEMBER(this, &Plugin::Hook_GameServerSteamAPIDeactivated), true);
-        m_iStartupServerHookID = SH_ADD_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &Plugin::Hook_StartupServer), true);
+        m_hGameFrame->Add(g_pSource2Server);
+        m_hGameServerSteamAPIActivated->Add(g_pSource2Server);
+        m_hGameServerSteamAPIDeactivated->Add(g_pSource2Server);
+        m_hStartupServer->Add(g_pNetworkServerService);
     }
 
     strncpy(g_szCrashCommandLine, CommandLine()->GetCmdLine(), sizeof(g_szCrashCommandLine) - 1);
 
     if (late)
     {
-        Hook_GameServerSteamAPIActivated();
-        Hook_StartupServer({}, nullptr, g_pNetworkServerService->GetIGameServer()->GetMapName());
+        Hook_GameServerSteamAPIActivated(g_pSource2Server);
+        Hook_StartupServer(g_pNetworkServerService, {}, nullptr, g_pNetworkServerService->GetIGameServer()->GetMapName());
     }
 
     return true;
@@ -707,17 +710,26 @@ bool Plugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool l
 
 bool Plugin::Unload(char* error, size_t maxlen)
 {
-    SH_REMOVE_HOOK_ID(m_iGameFrameHookID);
-    SH_REMOVE_HOOK_ID(m_iGameServerSteamAPIActivatedHookID);
-    SH_REMOVE_HOOK_ID(m_iGameServerSteamAPIDeactivatedHookID);
-    SH_REMOVE_HOOK_ID(m_iStartupServerHookID);
+    m_hGameFrame->Remove(g_pSource2Server);
+    m_hGameServerSteamAPIActivated->Remove(g_pSource2Server);
+    m_hGameServerSteamAPIDeactivated->Remove(g_pSource2Server);
+    m_hStartupServer->Remove(g_pNetworkServerService);
+
+    delete m_hGameFrame;
+    delete m_hGameServerSteamAPIActivated;
+    delete m_hGameServerSteamAPIDeactivated;
+    delete m_hStartupServer;
+    m_hGameFrame = nullptr;
+    m_hGameServerSteamAPIActivated = nullptr;
+    m_hGameServerSteamAPIDeactivated = nullptr;
+    m_hStartupServer = nullptr;
 
     delete g_pExceptionHandler;
 
     return true;
 }
 
-void Plugin::Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick)
+KHook::Return<void> Plugin::Hook_GameFrame(ISource2Server* pThis, bool simulating, bool bFirstTick, bool bLastTick)
 {
     bool bWeHaveBeenFuckedOver = false;
     struct sigaction oact;
@@ -734,7 +746,7 @@ void Plugin::Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick)
     }
 
     if (!bWeHaveBeenFuckedOver)
-        return;
+        return { KHook::Action::Ignore };
 
     struct sigaction act;
     memset(&act, 0, sizeof(act));
@@ -748,27 +760,35 @@ void Plugin::Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick)
 
     for (int i = 0; i < kNumHandledSignals; ++i)
         sigaction(kExceptionSignals[i], &act, NULL);
+
+    return { KHook::Action::Ignore };
 }
 
-void Plugin::Hook_GameServerSteamAPIActivated()
+KHook::Return<void> Plugin::Hook_GameServerSteamAPIActivated(ISource2Server* pThis)
 {
     g_steamAPI.Init();
     g_pSteamHttp = g_steamAPI.SteamHTTP();
 
     g_httpManager.DrainQueue();
     FlushPendingDiscordReport();
+
+    return { KHook::Action::Ignore };
 }
 
-void Plugin::Hook_GameServerSteamAPIDeactivated()
+KHook::Return<void> Plugin::Hook_GameServerSteamAPIDeactivated(ISource2Server* pThis)
 {
     g_pSteamHttp = nullptr;
+
+    return { KHook::Action::Ignore };
 }
 
-void Plugin::Hook_StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName)
+KHook::Return<void> Plugin::Hook_StartupServer(INetworkServerService* pThis, const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName)
 {
     strncpy(g_szCrashMap, pszMapName, sizeof(g_szCrashMap) - 1);
 
     WriteSessionState("started");
+
+    return { KHook::Action::Ignore };
 }
 
 ///////////////////////////////////////

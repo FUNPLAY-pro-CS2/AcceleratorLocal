@@ -18,10 +18,13 @@
 
 #include <ISmmPlugin.h>
 #include <iserver.h>
+#include "utils.hpp"
 
 class Plugin final : public ISmmPlugin, public IMetamodListener
 {
 public:
+	Plugin();
+
 	bool Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late);
 	bool Unload(char* error, size_t maxlen);
 	
@@ -35,16 +38,16 @@ private:
 	const char* GetDate();
 	const char* GetLogTag();
 
-public:
-	void Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick);
-	void Hook_GameServerSteamAPIActivated();
-	void Hook_GameServerSteamAPIDeactivated();
-	void Hook_StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName);
+public: // Hooks
+	KHook::Return<void> Hook_GameFrame(ISource2Server* pThis, bool simulating, bool bFirstTick, bool bLastTick);
+	KHook::Return<void> Hook_GameServerSteamAPIActivated(ISource2Server* pThis);
+	KHook::Return<void> Hook_GameServerSteamAPIDeactivated(ISource2Server* pThis);
+	KHook::Return<void> Hook_StartupServer(INetworkServerService* pThis, const GameSessionConfiguration_t& config, ISource2WorldSession* pWorldSession, const char* pszMapName);
 
-	int m_iGameFrameHookID;
-	int m_iGameServerSteamAPIActivatedHookID;
-	int m_iGameServerSteamAPIDeactivatedHookID;
-	int m_iStartupServerHookID;
+	KHook::Virtual<ISource2Server, void, bool, bool, bool>* m_hGameFrame = nullptr;
+	KHook::Virtual<ISource2Server, void>* m_hGameServerSteamAPIActivated = nullptr;
+	KHook::Virtual<ISource2Server, void>* m_hGameServerSteamAPIDeactivated = nullptr;
+	KHook::Virtual<INetworkServerService, void, const GameSessionConfiguration_t&, ISource2WorldSession*, const char*>* m_hStartupServer = nullptr;
 };
 
 PLUGIN_GLOBALVARS();

@@ -61,7 +61,7 @@ include_directories(
     ${SOURCESDK}/public/game/server
     ${SOURCESDK}/public/schemasystem
     ${METAMOD_DIR}/core
-    ${METAMOD_DIR}/core/sourcehook
+    ${METAMOD_DIR}/third_party/khook/include
     ${CMAKE_SOURCE_DIR}/vendor
     ${CMAKE_SOURCE_DIR}/vendor/breakpad/src
     ${CMAKE_SOURCE_DIR}/vendor/breakpad/src/client
