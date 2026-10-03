@@ -1,1 +1,2 @@
 Change this file on master and the CI cuts the next tag and release.
+Author string is a u8 literal and MSVC builds with /utf-8, so the name is UTF-8 on every compiler.
