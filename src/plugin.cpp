@@ -814,7 +814,7 @@ const char* Plugin::GetLogTag()
 
 const char* Plugin::GetAuthor()
 {
-    return "Slynx (˙·٠● S l y n x ●٠·˙), Phoenix (˙·٠●Феникс●٠·˙), Asher Baker (asherkin)";
+    return reinterpret_cast<const char*>(u8"Slynx (˙·٠● S l y n x ●٠·˙), Phoenix (˙·٠●Феникс●٠·˙), Asher Baker (asherkin)");
 }
 
 const char* Plugin::GetDescription()

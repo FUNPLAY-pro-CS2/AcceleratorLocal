@@ -3,6 +3,11 @@ project(accelerator_local C CXX ASM)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# Source files are UTF-8 (the author strings); MSVC would read them as the ANSI code page.
+if (MSVC)
+    add_compile_options(/utf-8)
+endif ()
+
 if(DEFINED ENV{HL2SDKCS2})
     set(SOURCESDK_DIR $ENV{HL2SDKCS2})
 else()
