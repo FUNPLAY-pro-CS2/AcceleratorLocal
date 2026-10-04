@@ -1,2 +1,3 @@
 Change this file on master and the CI cuts the next tag and release.
 Author string is a u8 literal and MSVC builds with /utf-8, so the name is UTF-8 on every compiler.
+Protobufs: the game folder comes first on protoc's include path, for SteamDatabase/Protobufs' per-game descriptor.proto (bd8f82d, needed by its dumps since 2026-10-04).
